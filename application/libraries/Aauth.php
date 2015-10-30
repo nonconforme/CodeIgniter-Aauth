@@ -13,7 +13,7 @@
  *
  * @copyright 2014-2015 Emre Akay
  *
- * @version 2.0
+ * @version 2.4.5
  *
  * @license LGPL
  * @license http://opensource.org/licenses/LGPL-3.0 Lesser GNU Public License
@@ -136,7 +136,7 @@ class Aauth {
 			$cookie = array(
 				'name'	 => 'user',
 				'value'	 => '',
-				'expire' => time()-3600,
+				'expire' => -3600,
 				'path'	 => '/',
 			);
 			$this->CI->input->set_cookie($cookie);
@@ -190,7 +190,7 @@ class Aauth {
 				$reCAPTCHA_cookie = array(
 					'name'	 => 'reCAPTCHA',
 					'value'	 => 'true',
-					'expire' => time()+7200,
+					'expire' => 7200,
 					'path'	 => '/',
 				);
 				$this->CI->input->set_cookie($reCAPTCHA_cookie);
@@ -216,19 +216,20 @@ class Aauth {
 		$query = $this->aauth_db->get($this->config_vars['users']);
 		
 		if($query->num_rows() == 0){
-			$this->error($this->CI->lang->line('aauth_error_login_failed'));
+			$this->error($this->CI->lang->line('aauth_error_no_user'));
 			return FALSE;
 		}
 		
 		$user_id = $query->row()->id;
+		if($this->config_vars['recaptcha_active']){
+			if( ($this->config_vars['use_cookies'] == TRUE && $this->CI->input->cookie('reCAPTCHA', TRUE) == 'true') || ($this->config_vars['use_cookies'] == FALSE && $this->CI->session->tempdata('reCAPTCHA') == 'true') ){
+				$reCaptcha = new ReCaptcha( $this->config_vars['recaptcha_secret']);
+				$resp = $reCaptcha->verifyResponse( $this->CI->input->server("REMOTE_ADDR"), $this->CI->input->post("g-recaptcha-response") );
 
-		if( ($this->config_vars['use_cookies'] == TRUE && $this->CI->input->cookie('reCAPTCHA', TRUE) == 'true') || ($this->config_vars['use_cookies'] == FALSE && $this->CI->session->tempdata('reCAPTCHA') == 'true') ){
-			$reCaptcha = new ReCaptcha( $this->config_vars['recaptcha_secret']);
-			$resp = $reCaptcha->verifyResponse( $this->CI->input->server("REMOTE_ADDR"), $this->CI->input->post("g-recaptcha-response") );
-
-			if(!$resp->success){
-				$this->error($this->CI->lang->line('aauth_error_recaptcha_not_correct'));
-				return FALSE;
+				if(!$resp->success){
+					$this->error($this->CI->lang->line('aauth_error_recaptcha_not_correct'));
+					return FALSE;
+				}
 			}
 		}
 	 	
@@ -315,7 +316,7 @@ class Aauth {
 					$cookie = array(
 						'name'	 => 'user',
 						'value'	 => $row->id . "-" . $random_string,
-						'expire' => time() + 99*999*999,
+						'expire' => 99*999*999,
 						'path'	 => '/',
 					);
 
@@ -330,7 +331,7 @@ class Aauth {
 					$reCAPTCHA_cookie = array(
 						'name'	 => 'reCAPTCHA',
 						'value'	 => 'false',
-						'expire' => time()-3600,
+						'expire' => -3600,
 						'path'	 => '/',
 					);
 					$this->CI->input->set_cookie($reCAPTCHA_cookie);
@@ -349,7 +350,7 @@ class Aauth {
 		// if not matches
 		else {
 
-			$this->error($this->CI->lang->line('aauth_error_login_failed'));
+			$this->error($this->CI->lang->line('aauth_error_login_failed_all'));
 			return FALSE;
 		}
 	}
@@ -471,7 +472,7 @@ class Aauth {
 			$cookie = array(
 				'name'	 => 'user',
 				'value'	 => '',
-				'expire' => time()-3600,
+				'expire' => -3600,
 				'path'	 => '/',
 			);
 			$this->CI->input->set_cookie($cookie);
@@ -712,7 +713,8 @@ class Aauth {
 			$this->error($this->CI->lang->line('aauth_error_email_exists'));
 			$valid = FALSE;
 		}
-		if (!valid_email($email)){
+		$valid_email = (bool) filter_var($email, FILTER_VALIDATE_EMAIL);
+		if (!$valid_email){
 			$this->error($this->CI->lang->line('aauth_error_email_invalid'));
 			$valid = FALSE;
 		}
@@ -778,8 +780,6 @@ class Aauth {
 	 */
 	public function update_user($user_id, $email = FALSE, $pass = FALSE, $name = FALSE) {
 
-		$valid = TRUE;
-
 		$data = array();
 		$valid = TRUE;
 
@@ -788,7 +788,8 @@ class Aauth {
 				$this->error($this->CI->lang->line('aauth_error_update_email_exists'));
 				$valid = FALSE;
 			}
-			if (!valid_email($email)){
+			$valid_email = (bool) filter_var($email, FILTER_VALIDATE_EMAIL);
+			if (!$valid_email){
 				$this->error($this->CI->lang->line('aauth_error_email_invalid'));
 				$valid = FALSE;
 			}
@@ -1144,7 +1145,7 @@ class Aauth {
 	function hash_password($pass, $userid) {
 
 		$salt = md5($userid);
-		return hash('sha256', $salt.$pass);
+		return hash($this->config_vars['hash'], $salt.$pass);
 	}
 
 	########################
@@ -1156,9 +1157,10 @@ class Aauth {
 	 * Create group
 	 * Creates a new group
 	 * @param string $group_name New group name
+	 * @param string $definition Description of the group
 	 * @return int|bool Group id or FALSE on fail
 	 */
-	public function create_group($group_name, $definition) {
+	public function create_group($group_name, $definition = '') {
 
 		$query = $this->aauth_db->get_where($this->config_vars['groups'], array('name' => $group_name));
 
@@ -1461,12 +1463,17 @@ class Aauth {
 	 */
 	public function is_allowed($perm_par, $user_id=FALSE){
 
-		$perm_id = $this->get_perm_id($perm_par);
-
 		if( $user_id == FALSE){
 			$user_id = $this->CI->session->userdata('id');
 		}
 
+		if($this->is_admin($user_id))
+		{
+			return true;
+		}
+
+		$perm_id = $this->get_perm_id($perm_par);
+		
 		$query = $this->aauth_db->where('perm_id', $perm_id);
 		$query = $this->aauth_db->where('user_id', $user_id);
 		$query = $this->aauth_db->get( $this->config_vars['perm_to_user'] );
@@ -2024,7 +2031,7 @@ class Aauth {
 		 if ($this->get_user_var($key,$user_id) ===FALSE) {
 
 			$data = array(
-				'key' => $key,
+				'data_key' => $key,
 				'value' => $value,
 				'user_id' => $user_id
 			);
@@ -2035,12 +2042,12 @@ class Aauth {
 		else {
 
 			$data = array(
-				'key' => $key,
+				'data_key' => $key,
 				'value' => $value,
 				'user_id' => $user_id
 			);
 
-			$this->aauth_db->where( 'key', $key );
+			$this->aauth_db->where( 'data_key', $key );
 			$this->aauth_db->where( 'user_id', $user_id);
 
 			return $this->aauth_db->update( $this->config_vars['user_variables'], $data);
@@ -2065,7 +2072,7 @@ class Aauth {
 			return FALSE;
 		}
 
-		$this->aauth_db->where('key', $key);
+		$this->aauth_db->where('data_key', $key);
 		$this->aauth_db->where('user_id', $user_id);
 
 		return $this->aauth_db->delete( $this->config_vars['user_variables'] );
@@ -2091,7 +2098,7 @@ class Aauth {
 		}
 
 		$query = $this->aauth_db->where('user_id', $user_id);
-		$query = $this->aauth_db->where('key', $key);
+		$query = $this->aauth_db->where('data_key', $key);
 
 		$query = $this->aauth_db->get( $this->config_vars['user_variables'] );
 
@@ -2123,7 +2130,7 @@ class Aauth {
 		if ( ! $this->get_user($user_id)){
 			return FALSE;
 		}
-		$query = $this->aauth_db->select('key');
+		$query = $this->aauth_db->select('data_key');
 
 		$query = $this->aauth_db->where('user_id', $user_id);
 
@@ -2155,7 +2162,7 @@ class Aauth {
 		if ($this->get_system_var($key) === FALSE) {
 
 			$data = array(
-				'key' => $key,
+				'data_key' => $key,
 				'value' => $value,
 			);
 
@@ -2166,11 +2173,11 @@ class Aauth {
 		else {
 
 			$data = array(
-				'key' => $key,
+				'data_key' => $key,
 				'value' => $value,
 			);
 
-			$this->aauth_db->where( 'key', $key );
+			$this->aauth_db->where( 'data_key', $key );
 			return $this->aauth_db->update( $this->config_vars['system_variables'], $data);
 		}
 
@@ -2184,7 +2191,7 @@ class Aauth {
 	 */
 	public function unset_system_var( $key	) {
 
-		$this->aauth_db->where('key', $key);
+		$this->aauth_db->where('data_key', $key);
 
 		return $this->aauth_db->delete( $this->config_vars['system_variables'] );
 	}
@@ -2198,7 +2205,7 @@ class Aauth {
 	 */
 	public function get_system_var( $key ){
 
-		$query = $this->aauth_db->where('key', $key);
+		$query = $this->aauth_db->where('data_key', $key);
 
 		$query = $this->aauth_db->get( $this->config_vars['system_variables'] );
 
@@ -2219,7 +2226,7 @@ class Aauth {
 	 */
 
 	public function list_system_var_keys(){
-		$query = $this->aauth_db->select('key');
+		$query = $this->aauth_db->select('data_key');
 		$query = $this->aauth_db->get( $this->config_vars['system_variables'] );
 		// if variable not set
 		if ($query->num_rows() < 1) { return FALSE;}
